@@ -13,6 +13,7 @@ from threestudio.models.prompt_processors.base import PromptProcessorOutput
 from threestudio.utils.base import BaseObject
 from threestudio.utils.misc import C, cleanup, parse_version
 from threestudio.utils.typing import *
+from diffusers import DDIMScheduler
 
 
 @threestudio.register("mvdream-multiview-diffusion-guidance")
@@ -22,13 +23,13 @@ class MultiviewDiffusionGuidance(BaseObject):
         model_name: str = (
             "sd-v2.1-base-4view"  # check mvdream.model_zoo.PRETRAINED_MODELS
         )
-        ckpt_path: Optional[
-            str
-        ] = None  # path to local checkpoint (None for loading from url)
+        ckpt_path: Optional[str] = (
+            None  # path to local checkpoint (None for loading from url)
+        )
         guidance_scale: float = 50.0
-        grad_clip: Optional[
-            Any
-        ] = None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
+        grad_clip: Optional[Any] = (
+            None  # field(default_factory=lambda: [0, 2.0, 8.0, 1000])
+        )
         half_precision_weights: bool = True
 
         min_step_percent: float = 0.02
@@ -42,11 +43,16 @@ class MultiviewDiffusionGuidance(BaseObject):
         recon_loss: bool = True
         recon_std_rescale: float = 0.5
 
+        pretrained_model_name_or_path: str = "stabilityai/stable-diffusion-2-1-base"
+
     cfg: Config
 
     def configure(self) -> None:
         threestudio.info(f"Loading Multiview Diffusion ...")
 
+        self.weights_dtype = (
+            torch.float16 if self.cfg.half_precision_weights else torch.float32
+        )
         self.model = build_model(self.cfg.model_name, ckpt_path=self.cfg.ckpt_path).to(
             self.device
         )
@@ -59,6 +65,15 @@ class MultiviewDiffusionGuidance(BaseObject):
         self.min_step = int(self.num_train_timesteps * min_step_percent)
         self.max_step = int(self.num_train_timesteps * max_step_percent)
         self.grad_clip_val: Optional[float] = None
+
+        self.scheduler = DDIMScheduler.from_pretrained(
+            self.cfg.pretrained_model_name_or_path,
+            subfolder="scheduler",
+            torch_dtype=self.weights_dtype,
+        )
+        self.alphas: Float[Tensor, "..."] = self.scheduler.alphas_cumprod.to(
+            self.device
+        )
 
         threestudio.info(f"Loaded Multiview Diffusion!")
 
@@ -217,7 +232,7 @@ class MultiviewDiffusionGuidance(BaseObject):
         else:
             # Original SDS
             # w(t), sigma_t^2
-            w = 1 - self.alphas_cumprod[t]
+            w = (1 - self.alphas[t]).view(-1, 1, 1, 1)
             grad = w * (noise_pred - noise)
 
             # clip grad for stable training?
